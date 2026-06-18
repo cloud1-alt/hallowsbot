@@ -162,6 +162,8 @@ async def download_image(session: aiohttp.ClientSession, url: str) -> bytes | No
     name="inventory",
     description="Mostra o inventário de limiteds de um player do Roblox",
 )
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(player="ID numérico ou username do Roblox")
 async def inventory(interaction: discord.Interaction, player: str):
     await interaction.response.defer(thinking=True)
@@ -288,7 +290,8 @@ async def inventory(interaction: discord.Interaction, player: str):
 @client.event
 async def on_ready():
     await tree.sync()
-    print(f"✅ Bot online: {client.user} | Comandos sincronizados")
+    print(f"✅ Bot conectado como {client.user}")
+    print(f"📡 Slash commands sincronizados: {[c.name for c in tree.get_commands()]}")
 
 
 client.run(TOKEN)
