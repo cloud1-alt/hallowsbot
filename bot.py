@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import io
 import os
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from renderer import render_inventory_image
 
@@ -29,8 +30,7 @@ HEADERS_ROLIMONS = {
 
 # ─── Roblox helpers ────────────────────────────────────────────────────────────
 
-async def resolve_user(session: aiohttp.ClientSession, identifier: str) -> dict | None:
-    """Accepts numeric ID or username. Returns {"id": int, "name": str} or None."""
+async def resolve_user(session, identifier):
     if identifier.isdigit():
         async with session.get(
             f"https://users.roblox.com/v1/users/{identifier}",
@@ -53,8 +53,7 @@ async def resolve_user(session: aiohttp.ClientSession, identifier: str) -> dict 
     return None
 
 
-async def get_collectibles(session: aiohttp.ClientSession, user_id: int) -> list[dict]:
-    """Retorna todos os limiteds do inventário (API pública do Roblox)."""
+async def get_collectibles(session, user_id):
     items = []
     cursor = ""
     while True:
@@ -75,21 +74,7 @@ async def get_collectibles(session: aiohttp.ClientSession, user_id: int) -> list
     return items
 
 
-async def get_thumbnail_url(session: aiohttp.ClientSession, asset_id: int) -> str | None:
-    url = (
-        f"https://thumbnails.roblox.com/v1/assets"
-        f"?assetIds={asset_id}&size=150x150&format=Png&isCircular=false"
-    )
-    async with session.get(url, headers=HEADERS_ROBLOX) as r:
-        if r.status == 200:
-            data = await r.json()
-            d = data.get("data", [])
-            if d and d[0].get("state") == "Completed":
-                return d[0]["imageUrl"]
-    return None
-
-
-async def get_thumbnails_batch(session: aiohttp.ClientSession, asset_ids: list[int]) -> dict[int, str]:
+async def get_thumbnails_batch(session, asset_ids):
     """Busca thumbnails via API do Roblox. Para os que falharem, usa Rolimons como fallback."""
     result = {}
     for i in range(0, len(asset_ids), 100):
@@ -114,7 +99,7 @@ async def get_thumbnails_batch(session: aiohttp.ClientSession, asset_ids: list[i
     return result
 
 
-async def get_user_avatar_url(session: aiohttp.ClientSession, user_id: int) -> str | None:
+async def get_user_avatar_url(session, user_id):
     url = (
         f"https://thumbnails.roblox.com/v1/users/avatar-headshot"
         f"?userIds={user_id}&size=420x420&format=Png"
@@ -130,7 +115,7 @@ async def get_user_avatar_url(session: aiohttp.ClientSession, user_id: int) -> s
 
 # ─── Rolimons helpers ──────────────────────────────────────────────────────────
 
-async def get_rolimons_player(session: aiohttp.ClientSession, user_id: int) -> dict | None:
+async def get_rolimons_player(session, user_id):
     async with session.get(
         f"https://www.rolimons.com/playerapi/player/{user_id}",
         headers=HEADERS_ROLIMONS,
@@ -140,19 +125,34 @@ async def get_rolimons_player(session: aiohttp.ClientSession, user_id: int) -> d
     return None
 
 
-async def get_rolimons_items(session: aiohttp.ClientSession) -> dict:
-    """Retorna mapa {assetId: [name, acronym, value, demand, trend, projected, hyped, rare, ...]}"""
-    async with session.get(
-        "https://www.rolimons.com/itemapi/itemdetails",
-        headers=HEADERS_ROLIMONS,
-    ) as r:
-        if r.status == 200:
-            data = await r.json()
-            return data.get("items", {})
+async def get_rolimons_items(session):
+    """
+    itemdetails: { assetId: [Name(0), Acronym(1), RAP(2), Value(3), DefaultValue(4), ...] }
+    Tenta o endpoint público primeiro (sem cookie), fallback pro autenticado.
+    Value == -1 significa sem value definido no Rolimons.
+    """
+    # Endpoint público — não precisa de cookie
+    urls = [
+        ("https://api.rolimons.com/items/v2/itemdetails", HEADERS_ROBLOX),
+        ("https://www.rolimons.com/itemapi/itemdetails",  HEADERS_ROLIMONS),
+    ]
+    for url, headers in urls:
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                print(f"[itemdetails] {url} → {r.status}")
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    items = data.get("items", {})
+                    if items:
+                        print(f"[itemdetails] OK — {len(items)} itens carregados")
+                        return items
+        except Exception as e:
+            print(f"[itemdetails] erro em {url}: {e}")
+    print("[itemdetails] FALHOU em todos os endpoints")
     return {}
 
 
-async def download_image(session: aiohttp.ClientSession, url: str) -> bytes | None:
+async def download_image(session, url):
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
             if r.status == 200:
@@ -184,34 +184,45 @@ async def inventory(interaction: discord.Interaction, player: str):
             )
             return
 
-        user_id = user["id"]
+        user_id  = user["id"]
         username = user["name"]
 
-        # 2. Buscar dados Rolimons (valor, RAP, etc.)
-        roli_data = await get_rolimons_player(session, user_id)
+        # 2. Buscar dados Rolimons
+        roli_data     = await get_rolimons_player(session, user_id)
         roli_items_db = await get_rolimons_items(session)
 
         # 3. Montar collectibles
-        # itemdetails: [Name, Acronym, RAP, Value, DefaultValue, Demand, Trend, ...]
-        # player_assets: [serial, rap, value, ...] — índices próprios
-        # Sempre buscar name/value da roli_items_db (mais confiável)
+        # itemdetails: [Name(0), Acronym(1), RAP(2), Value(3), DefaultValue(4), ...]
+        # player_assets do Rolimons: { assetId: [serial, rap, value, ...] }
+        #   — mas RAP/Value aqui podem estar desatualizados; usamos itemdetails como fonte principal
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+
         collectibles = []
         if roli_data and roli_data.get("player_assets"):
             for asset_id_str, vals in roli_data["player_assets"].items():
                 item_info = roli_items_db.get(asset_id_str, [])
-                # item_info: [Name, Acronym, RAP, Value, DefaultValue, ...]
+
                 name  = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
-                # RAP e Value vêm da itemdetails (índices 2 e 3)
                 rap   = item_info[2] if len(item_info) > 2 else -1
                 value = item_info[3] if len(item_info) > 3 else -1
-                # Serial vem do player_assets índice 0
+
                 serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
+
+                # hold: timestamp em que o player obteve o item (índice 4 no player_assets)
+                obtained_ts = vals[4] if len(vals) > 4 and vals[4] and vals[4] > 0 else None
+                # Como não temos info se foi trade ou compra, usamos 7 dias como hold padrão
+                on_hold = False
+                if obtained_ts:
+                    days_held = (now_ts - obtained_ts) / 86400
+                    on_hold = days_held < 7
+
                 collectibles.append({
-                    "assetId": int(asset_id_str),
-                    "name":    name,
-                    "rap":     rap   if rap   > 0 else None,
-                    "value":   value if value > 0 else None,
-                    "serial":  serial,
+                    "assetId":  int(asset_id_str),
+                    "name":     name,
+                    "rap":      rap   if rap   > 0 else None,
+                    "value":    value if value > 0 else None,
+                    "serial":   serial,
+                    "on_hold":  on_hold,
                 })
         else:
             raw = await get_collectibles(session, user_id)
@@ -226,6 +237,7 @@ async def inventory(interaction: discord.Interaction, player: str):
                     "rap":     rap_raw   if rap_raw   > 0 else None,
                     "value":   value_raw if value_raw > 0 else None,
                     "serial":  item.get("serialNumber"),
+                    "on_hold": False,
                 })
 
         if not collectibles:
@@ -234,37 +246,39 @@ async def inventory(interaction: discord.Interaction, player: str):
             )
             return
 
-        # 4. Calcular totais
-        # Value usa RAP como fallback quando o item não tem value definido no Rolimons
+        # 4. Ordenar do maior pro menor value (fallback: rap)
+        collectibles.sort(
+            key=lambda c: (c["value"] or c["rap"] or 0),
+            reverse=True,
+        )
+
+        # 5. Calcular totais (value usa rap como fallback se não tiver value)
         total_rap   = sum(c["rap"]   or 0 for c in collectibles)
         total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
-        item_count = len(collectibles)
+        item_count  = len(collectibles)
 
-        # Mostrar apenas os primeiros 18 itens na imagem (layout fixo)
+        # Mostrar apenas os primeiros 18 itens na imagem
         display_items = collectibles[:18]
 
-        # 5. Thumbnails em batch
+        # 6. Thumbnails em batch
         asset_ids = [c["assetId"] for c in display_items]
-        thumbs = await get_thumbnails_batch(session, asset_ids)
+        thumbs    = await get_thumbnails_batch(session, asset_ids)
 
-        # 6. Download das imagens
-        thumb_images: dict[int, bytes] = {}
-        tasks = {
-            aid: download_image(session, url)
-            for aid, url in thumbs.items()
-        }
+        # 7. Download das imagens em paralelo
+        thumb_images = {}
+        tasks   = {aid: download_image(session, url) for aid, url in thumbs.items()}
         results = await asyncio.gather(*tasks.values())
         for aid, img_bytes in zip(tasks.keys(), results):
             if img_bytes:
                 thumb_images[aid] = img_bytes
 
-        # 7. Avatar do usuário
-        avatar_url = await get_user_avatar_url(session, user_id)
+        # 8. Avatar
+        avatar_url   = await get_user_avatar_url(session, user_id)
         avatar_bytes = None
         if avatar_url:
             avatar_bytes = await download_image(session, avatar_url)
 
-        # 8. Renderizar imagem
+        # 9. Renderizar imagem
         img_bytes = await asyncio.get_event_loop().run_in_executor(
             None,
             render_inventory_image,
@@ -278,17 +292,9 @@ async def inventory(interaction: discord.Interaction, player: str):
             avatar_bytes,
         )
 
+        # 10. Mandar só a imagem pura (sem embed, sem footer)
         file = discord.File(io.BytesIO(img_bytes), filename="inventory.png")
-        embed = discord.Embed(
-            title=f"",
-            color=0xFF6A00,
-        )
-        embed.set_image(url="attachment://inventory.png")
-
-        more_text = f" *(+{item_count - 18} itens não exibidos)*" if item_count > 18 else ""
-        embed.set_footer(text=f"Mostrando {min(18, item_count)} de {item_count} itens{more_text} • Powered by Rolimons")
-
-        await interaction.followup.send(embed=embed, file=file)
+        await interaction.followup.send(file=file)
 
 
 # ─── Eventos ───────────────────────────────────────────────────────────────────
