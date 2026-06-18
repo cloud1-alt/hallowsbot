@@ -1,329 +1,303 @@
-"""
-renderer.py — Gera a imagem do inventário estilo Rolimons
-com tema visual inspirado no Hallows (laranja + preto).
-"""
-
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
 import io
-import math
 import os
+from dotenv import load_dotenv
+from renderer import render_inventory_image
 
-# ─── Paleta Hallows ────────────────────────────────────────────────────────────
-BG_DARK       = (15, 12, 8)
-BG_CARD       = (28, 22, 14)
-ORANGE_MAIN   = (255, 106, 0)
-ORANGE_LIGHT  = (255, 165, 60)
-ORANGE_GLOW   = (255, 90, 0, 55)
-TEXT_WHITE    = (240, 235, 225)
-TEXT_MUTED    = (160, 145, 120)
-TEXT_GREEN    = (80, 220, 120)
-DIVIDER       = (50, 38, 22)
-SERIAL_COLOR  = (255, 186, 60)
+load_dotenv()
 
-# ─── Layout ────────────────────────────────────────────────────────────────────
-IMG_WIDTH     = 980
-COLS          = 6
-CARD_W        = 148
-CARD_H        = 210
-CARD_PAD      = 10
-HEADER_H      = 96
-SIDE_PAD      = 20
-THUMB_SIZE    = 120   # tamanho do thumbnail dentro do card
-AVATAR_SIZE   = 64    # tamanho do avatar no header
+TOKEN = os.getenv("DISCORD_TOKEN")
+ROLI_SECURITY = os.getenv("ROLI_SECURITY")
 
-# ─── Fontes ────────────────────────────────────────────────────────────────────
-def load_font(size: int, bold: bool = False):
-    candidates = [
-        f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf",
-        f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else ''}.ttf",
-        f"/usr/share/fonts/truetype/freefont/FreeSans{'Bold' if bold else ''}.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                pass
-    return ImageFont.load_default()
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
+HEADERS_ROBLOX = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+}
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
+HEADERS_ROLIMONS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Cookie": f"rolimons_security={ROLI_SECURITY}",
+    "Referer": "https://www.rolimons.com/",
+}
 
-def fmt_number(n) -> str:
-    if n is None:
-        return "-"
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n/1_000:.1f}k"
-    return str(int(n))
+# ─── Roblox helpers ────────────────────────────────────────────────────────────
 
-
-def paste_rgba(base: Image.Image, overlay: Image.Image, x: int, y: int):
-    """Cola imagem RGBA sobre base RGB respeitando transparência corretamente."""
-    if base.mode != "RGBA":
-        base_rgba = base.convert("RGBA")
+async def resolve_user(session: aiohttp.ClientSession, identifier: str) -> dict | None:
+    """Accepts numeric ID or username. Returns {"id": int, "name": str} or None."""
+    if identifier.isdigit():
+        async with session.get(
+            f"https://users.roblox.com/v1/users/{identifier}",
+            headers=HEADERS_ROBLOX,
+        ) as r:
+            if r.status == 200:
+                data = await r.json()
+                return {"id": data["id"], "name": data["name"]}
     else:
-        base_rgba = base
-    if overlay.mode != "RGBA":
-        overlay = overlay.convert("RGBA")
-    base_rgba.paste(overlay, (x, y), overlay)
-    # Converter de volta para RGB preservando o resultado
-    result = base_rgba.convert("RGB")
-    base.paste(result)
+        async with session.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [identifier], "excludeBannedUsers": False},
+            headers=HEADERS_ROBLOX,
+        ) as r:
+            if r.status == 200:
+                data = await r.json()
+                results = data.get("data", [])
+                if results:
+                    return {"id": results[0]["id"], "name": results[0]["name"]}
+    return None
 
 
-def make_circle_avatar(img_bytes: bytes, size: int) -> Image.Image:
-    """Cria avatar circular a partir de bytes, com alta qualidade."""
-    # Abre e redimensiona em tamanho 4x para depois reduzir (antialiasing manual)
-    scale = 4
-    big = size * scale
-    av = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-    av = av.resize((big, big), Image.LANCZOS)
+async def get_collectibles(session: aiohttp.ClientSession, user_id: int) -> list[dict]:
+    """Retorna todos os limiteds do inventário (API pública do Roblox)."""
+    items = []
+    cursor = ""
+    while True:
+        url = (
+            f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles"
+            f"?limit=100&sortOrder=Desc"
+        )
+        if cursor:
+            url += f"&cursor={cursor}"
+        async with session.get(url, headers=HEADERS_ROBLOX) as r:
+            if r.status != 200:
+                break
+            data = await r.json()
+            items.extend(data.get("data", []))
+            cursor = data.get("nextPageCursor") or ""
+            if not cursor:
+                break
+    return items
 
-    # Máscara circular suave
-    mask = Image.new("L", (big, big), 0)
-    ImageDraw.Draw(mask).ellipse([0, 0, big - 1, big - 1], fill=255)
 
-    result = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    result.paste(av, mask=mask)
+async def get_thumbnail_url(session: aiohttp.ClientSession, asset_id: int) -> str | None:
+    url = (
+        f"https://thumbnails.roblox.com/v1/assets"
+        f"?assetIds={asset_id}&size=150x150&format=Png&isCircular=false"
+    )
+    async with session.get(url, headers=HEADERS_ROBLOX) as r:
+        if r.status == 200:
+            data = await r.json()
+            d = data.get("data", [])
+            if d and d[0].get("state") == "Completed":
+                return d[0]["imageUrl"]
+    return None
 
-    # Reduzir para tamanho final com LANCZOS
-    result = result.resize((size, size), Image.LANCZOS)
+
+async def get_thumbnails_batch(session: aiohttp.ClientSession, asset_ids: list[int]) -> dict[int, str]:
+    """Busca thumbnails via API do Roblox. Para os que falharem, usa Rolimons como fallback."""
+    result = {}
+    for i in range(0, len(asset_ids), 100):
+        batch = asset_ids[i : i + 100]
+        ids_str = ",".join(str(a) for a in batch)
+        url = (
+            f"https://thumbnails.roblox.com/v1/assets"
+            f"?assetIds={ids_str}&size=420x420&format=Png&isCircular=false"
+        )
+        async with session.get(url, headers=HEADERS_ROBLOX) as r:
+            if r.status == 200:
+                data = await r.json()
+                for item in data.get("data", []):
+                    if item.get("state") == "Completed":
+                        result[item["targetId"]] = item["imageUrl"]
+
+    # Fallback: itens sem thumb puxam direto do Rolimons
+    missing = [aid for aid in asset_ids if aid not in result]
+    for aid in missing:
+        result[aid] = f"https://www.rolimons.com/images/items/{aid}_full.png"
+
     return result
 
 
-def draw_glow_rect(img: Image.Image, xy, color_rgba, radius=8):
-    """Glow laranja sutil em volta dos cards."""
-    glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    x0, y0, x1, y1 = xy
-    for expand in range(7, 0, -1):
-        alpha = int(color_rgba[3] * (expand / 7) * 0.9)
-        gd.rounded_rectangle(
-            [x0 - expand, y0 - expand, x1 + expand, y1 + expand],
-            radius=radius + expand,
-            fill=(*color_rgba[:3], alpha),
-        )
-    base_rgba = img.convert("RGBA")
-    base_rgba = Image.alpha_composite(base_rgba, glow)
-    img.paste(base_rgba.convert("RGB"))
+async def get_user_avatar_url(session: aiohttp.ClientSession, user_id: int) -> str | None:
+    url = (
+        f"https://thumbnails.roblox.com/v1/users/avatar-headshot"
+        f"?userIds={user_id}&size=420x420&format=Png"
+    )
+    async with session.get(url, headers=HEADERS_ROBLOX) as r:
+        if r.status == 200:
+            data = await r.json()
+            d = data.get("data", [])
+            if d and d[0].get("state") == "Completed":
+                return d[0]["imageUrl"]
+    return None
 
 
-def make_hallows_bg_pattern(width: int, height: int) -> Image.Image:
-    """Fundo com tiles do Hallows em grade alinhada."""
-    bg = Image.new("RGBA", (width, height), BG_DARK + (255,))
+# ─── Rolimons helpers ──────────────────────────────────────────────────────────
 
-    hallows_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hallows.png")
-    if os.path.exists(hallows_path):
-        tile_src = Image.open(hallows_path).convert("RGBA")
-        tile_size = 92
-        tile = tile_src.resize((tile_size, tile_size), Image.LANCZOS)
-
-        # Opacidade 16%
-        r, g, b, a = tile.split()
-        a = a.point(lambda x: int(x * 0.16))
-        tile.putalpha(a)
-
-        gap = 16
-        step = tile_size + gap
-        for row_y in range(0, height + step, step):
-            for col_x in range(0, width + step, step):
-                bg.paste(tile, (col_x, row_y), tile)
-
-    # Overlay escuro para não competir com os cards
-    overlay = Image.new("RGBA", (width, height), (*BG_DARK, 110))
-    bg = Image.alpha_composite(bg, overlay)
-    return bg
+async def get_rolimons_player(session: aiohttp.ClientSession, user_id: int) -> dict | None:
+    async with session.get(
+        f"https://www.rolimons.com/playerapi/player/{user_id}",
+        headers=HEADERS_ROLIMONS,
+    ) as r:
+        if r.status == 200:
+            return await r.json()
+    return None
 
 
-# ─── Renderer principal ────────────────────────────────────────────────────────
+async def get_rolimons_items(session: aiohttp.ClientSession) -> dict:
+    """Retorna mapa {assetId: [name, acronym, value, demand, trend, projected, hyped, rare, ...]}"""
+    async with session.get(
+        "https://www.rolimons.com/itemapi/itemdetails",
+        headers=HEADERS_ROLIMONS,
+    ) as r:
+        if r.status == 200:
+            data = await r.json()
+            return data.get("items", {})
+    return {}
 
-def render_inventory_image(
-    username: str,
-    user_id: int,
-    total_value: int,
-    total_rap: int,
-    item_count: int,
-    items: list,
-    thumb_images: dict,
-    avatar_bytes,
-) -> bytes:
 
-    rows = math.ceil(len(items) / COLS)
-    grid_h = rows * (CARD_H + CARD_PAD) + CARD_PAD
-    img_height = HEADER_H + grid_h + 28
+async def download_image(session: aiohttp.ClientSession, url: str) -> bytes | None:
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                return await r.read()
+    except Exception:
+        pass
+    return None
 
-    # ── Base ──────────────────────────────────────────────────────────────────
-    bg = make_hallows_bg_pattern(IMG_WIDTH, img_height)
-    img = bg.convert("RGB")
-    draw = ImageDraw.Draw(img)
 
-    # ── HEADER ────────────────────────────────────────────────────────────────
+# ─── Slash command ─────────────────────────────────────────────────────────────
 
-    # Barra laranja no topo
-    draw.rectangle([0, 0, IMG_WIDTH, 4], fill=ORANGE_MAIN)
+@tree.command(
+    name="inventory",
+    description="Mostra o inventário de limiteds de um player do Roblox",
+)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(player="ID numérico ou username do Roblox")
+async def inventory(interaction: discord.Interaction, player: str):
+    await interaction.response.defer(thinking=True)
 
-    # Avatar circular de alta qualidade
-    av_x, av_y = SIDE_PAD, 16
-    if avatar_bytes:
-        try:
-            av_circle = make_circle_avatar(avatar_bytes, AVATAR_SIZE)
-            # Borda laranja: desenha círculo laranja ligeiramente maior antes
-            border_size = AVATAR_SIZE + 6
-            border_circle = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
-            ImageDraw.Draw(border_circle).ellipse(
-                [0, 0, border_size - 1, border_size - 1], fill=ORANGE_MAIN
+    async with aiohttp.ClientSession() as session:
+        # 1. Resolver usuário
+        user = await resolve_user(session, player)
+        if not user:
+            await interaction.followup.send(
+                f"❌ Não encontrei o usuário **{player}**. Verifique o ID ou username.",
+                ephemeral=True,
             )
-            paste_rgba(img, border_circle, av_x - 3, av_y - 3)
-            paste_rgba(img, av_circle, av_x, av_y)
-        except Exception:
-            pass
+            return
 
-    # Fontes do header
-    font_name  = load_font(24, bold=True)
-    font_stats = load_font(14)
-    font_label = load_font(12)
+        user_id = user["id"]
+        username = user["name"]
 
-    name_x = av_x + AVATAR_SIZE + 16
-    name_y = av_y + 4
-    draw.text((name_x, name_y), username, font=font_name, fill=TEXT_WHITE)
+        # 2. Buscar dados Rolimons (valor, RAP, etc.)
+        roli_data = await get_rolimons_player(session, user_id)
+        roli_items_db = await get_rolimons_items(session)
 
-    # Stats em linha
-    stats_y = name_y + 32
-    stats = [
-        ("Value", fmt_number(total_value)),
-        ("RAP",   fmt_number(total_rap)),
-        ("Items", str(item_count)),
-    ]
-    sx = name_x
-    for label, val in stats:
-        lw = draw.textlength(label, font=font_label)
-        draw.text((sx, stats_y), label, font=font_label, fill=TEXT_MUTED)
-        draw.text((sx + lw + 5, stats_y), val, font=font_stats, fill=ORANGE_LIGHT)
-        vw = draw.textlength(val, font=font_stats)
-        sx += int(lw + vw + 26)
-
-    # Separador com ponto laranja central
-    sep_y = HEADER_H - 10
-    draw.line([(SIDE_PAD, sep_y), (IMG_WIDTH - SIDE_PAD, sep_y)], fill=DIVIDER, width=1)
-    mid = IMG_WIDTH // 2
-    draw.ellipse([mid - 4, sep_y - 4, mid + 4, sep_y + 4], fill=ORANGE_MAIN)
-
-    # ── GRID DE ITENS ─────────────────────────────────────────────────────────
-
-    font_item_name = load_font(12, bold=True)
-    font_item_val  = load_font(12)
-    font_serial    = load_font(11)
-
-    total_grid_w = COLS * CARD_W + (COLS - 1) * CARD_PAD
-    grid_x_start = (IMG_WIDTH - total_grid_w) // 2
-
-    for idx, item in enumerate(items):
-        col = idx % COLS
-        row = idx // COLS
-
-        x0 = grid_x_start + col * (CARD_W + CARD_PAD)
-        y0 = HEADER_H + CARD_PAD + row * (CARD_H + CARD_PAD)
-        x1 = x0 + CARD_W
-        y1 = y0 + CARD_H
-
-        # Glow laranja
-        draw_glow_rect(img, (x0, y0, x1, y1), ORANGE_GLOW, radius=9)
-
-        # Redesenhar o draw depois do glow (ele reconverte o img)
-        draw = ImageDraw.Draw(img)
-
-        # Card background + borda
-        draw.rounded_rectangle(
-            [x0, y0, x1, y1], radius=9,
-            fill=BG_CARD, outline=ORANGE_MAIN, width=1
-        )
-
-        # ── Thumbnail ─────────────────────────────────────────────────────────
-        asset_id   = item["assetId"]
-        thumb_data = thumb_images.get(asset_id)
-        thumb_cx   = x0 + CARD_W // 2
-        thumb_cy   = y0 + 8 + THUMB_SIZE // 2
-
-        if thumb_data:
-            try:
-                th = Image.open(io.BytesIO(thumb_data)).convert("RGBA")
-                th = th.resize((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
-                paste_rgba(img, th, thumb_cx - THUMB_SIZE // 2, thumb_cy - THUMB_SIZE // 2)
-                draw = ImageDraw.Draw(img)
-            except Exception:
-                pass
+        # 3. Montar collectibles
+        # itemdetails: [Name, Acronym, RAP, Value, DefaultValue, Demand, Trend, ...]
+        # player_assets: [serial, rap, value, ...] — índices próprios
+        # Sempre buscar name/value da roli_items_db (mais confiável)
+        collectibles = []
+        if roli_data and roli_data.get("player_assets"):
+            for asset_id_str, vals in roli_data["player_assets"].items():
+                item_info = roli_items_db.get(asset_id_str, [])
+                # item_info: [Name, Acronym, RAP, Value, DefaultValue, ...]
+                name  = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
+                # RAP e Value vêm da itemdetails (índices 2 e 3)
+                rap   = item_info[2] if len(item_info) > 2 else -1
+                value = item_info[3] if len(item_info) > 3 else -1
+                # Serial vem do player_assets índice 0
+                serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
+                collectibles.append({
+                    "assetId": int(asset_id_str),
+                    "name":    name,
+                    "rap":     rap   if rap   > 0 else None,
+                    "value":   value if value > 0 else None,
+                    "serial":  serial,
+                })
         else:
-            # Placeholder quando não há thumb
-            ph_x = x0 + (CARD_W - THUMB_SIZE) // 2
-            ph_y = y0 + 8
-            draw.rounded_rectangle(
-                [ph_x, ph_y, ph_x + THUMB_SIZE, ph_y + THUMB_SIZE],
-                radius=6, fill=(35, 28, 18)
+            raw = await get_collectibles(session, user_id)
+            for item in raw:
+                asset_id_str = str(item.get("assetId", ""))
+                item_info    = roli_items_db.get(asset_id_str, [])
+                rap_raw   = item_info[2] if len(item_info) > 2 else -1
+                value_raw = item_info[3] if len(item_info) > 3 else -1
+                collectibles.append({
+                    "assetId": item["assetId"],
+                    "name":    item_info[0] if len(item_info) > 0 else item.get("name", "Unknown"),
+                    "rap":     rap_raw   if rap_raw   > 0 else None,
+                    "value":   value_raw if value_raw > 0 else None,
+                    "serial":  item.get("serialNumber"),
+                })
+
+        if not collectibles:
+            await interaction.followup.send(
+                f"📦 **{username}** não tem limiteds visíveis no inventário.",
             )
-            qm = load_font(34)
-            draw.text((ph_x + THUMB_SIZE // 2 - 9, ph_y + THUMB_SIZE // 2 - 18),
-                      "?", font=qm, fill=TEXT_MUTED)
+            return
 
-        # ── Nome do item ──────────────────────────────────────────────────────
-        name   = item.get("name", "Unknown")
-        name_y = y0 + 8 + THUMB_SIZE + 6
+        # 4. Calcular totais
+        # Value usa RAP como fallback quando o item não tem value definido no Rolimons
+        total_rap   = sum(c["rap"]   or 0 for c in collectibles)
+        total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
+        item_count = len(collectibles)
 
-        words   = name.split()
-        lines   = []
-        current = ""
-        for w in words:
-            test = (current + " " + w).strip()
-            if draw.textlength(test, font=font_item_name) <= CARD_W - 10:
-                current = test
-            else:
-                if current:
-                    lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
-        lines = lines[:2]
+        # Mostrar apenas os primeiros 18 itens na imagem (layout fixo)
+        display_items = collectibles[:18]
 
-        for i, line in enumerate(lines):
-            tw = draw.textlength(line, font=font_item_name)
-            draw.text(
-                (x0 + (CARD_W - tw) // 2, name_y + i * 15),
-                line, font=font_item_name, fill=TEXT_WHITE
-            )
+        # 5. Thumbnails em batch
+        asset_ids = [c["assetId"] for c in display_items]
+        thumbs = await get_thumbnails_batch(session, asset_ids)
 
-        # ── RAP / Value / Serial ──────────────────────────────────────────────
-        rap    = item.get("rap")
-        value  = item.get("value")
-        serial = item.get("serial")
+        # 6. Download das imagens
+        thumb_images: dict[int, bytes] = {}
+        tasks = {
+            aid: download_image(session, url)
+            for aid, url in thumbs.items()
+        }
+        results = await asyncio.gather(*tasks.values())
+        for aid, img_bytes in zip(tasks.keys(), results):
+            if img_bytes:
+                thumb_images[aid] = img_bytes
 
-        info_y = y1 - 46
+        # 7. Avatar do usuário
+        avatar_url = await get_user_avatar_url(session, user_id)
+        avatar_bytes = None
+        if avatar_url:
+            avatar_bytes = await download_image(session, avatar_url)
 
-        # RAP
-        rap_str = f"RAP  {fmt_number(rap)}"
-        tw = draw.textlength(rap_str, font=font_item_val)
-        draw.text((x0 + (CARD_W - tw) // 2, info_y), rap_str,
-                  font=font_item_val, fill=TEXT_MUTED)
+        # 8. Renderizar imagem
+        img_bytes = await asyncio.get_event_loop().run_in_executor(
+            None,
+            render_inventory_image,
+            username,
+            user_id,
+            total_value,
+            total_rap,
+            item_count,
+            display_items,
+            thumb_images,
+            avatar_bytes,
+        )
 
-        # Value
-        val_str   = fmt_number(value)
-        val_color = TEXT_GREEN if value and value > (rap or 0) else ORANGE_LIGHT
-        tw = draw.textlength(val_str, font=font_item_val)
-        draw.text((x0 + (CARD_W - tw) // 2, info_y + 16), val_str,
-                  font=font_item_val, fill=val_color)
+        file = discord.File(io.BytesIO(img_bytes), filename="inventory.png")
+        embed = discord.Embed(
+            title=f"",
+            color=0xFF6A00,
+        )
+        embed.set_image(url="attachment://inventory.png")
 
-        # Serial
-        if serial:
-            s_str = f"#{serial}"
-            tw = draw.textlength(s_str, font=font_serial)
-            draw.text((x0 + (CARD_W - tw) // 2, info_y + 31), s_str,
-                      font=font_serial, fill=SERIAL_COLOR)
+        more_text = f" *(+{item_count - 18} itens não exibidos)*" if item_count > 18 else ""
+        embed.set_footer(text=f"Mostrando {min(18, item_count)} de {item_count} itens{more_text} • Powered by Rolimons")
 
-    # ── FOOTER ────────────────────────────────────────────────────────────────
-    draw.rectangle([0, img_height - 4, IMG_WIDTH, img_height], fill=ORANGE_MAIN)
+        await interaction.followup.send(embed=embed, file=file)
 
-    out = io.BytesIO()
-    img.save(out, format="PNG", optimize=True)
-    out.seek(0)
-    return out.read()
+
+# ─── Eventos ───────────────────────────────────────────────────────────────────
+
+@client.event
+async def on_ready():
+    await tree.sync()
+    print(f"✅ Bot conectado como {client.user}")
+    print(f"📡 Slash commands sincronizados: {[c.name for c in tree.get_commands()]}")
+
+
+client.run(TOKEN)
