@@ -250,21 +250,7 @@ def render_inventory_image(
         if thumb_data:
             try:
                 th = Image.open(io.BytesIO(thumb_data)).convert("RGBA")
-
-                # Redimensionar em 2x e reduzir (melhor qualidade)
-                big_size = THUMB_SIZE * 2
-                th = th.resize((big_size, big_size), Image.LANCZOS)
                 th = th.resize((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
-
-                # Remover fundo preto/cinza escuro das thumbnails do Roblox
-                # (substitui pixels muito escuros por transparente)
-                pixels = th.load()
-                for py in range(th.height):
-                    for px in range(th.width):
-                        r, g, b, a = pixels[px, py]
-                        if r < 18 and g < 18 and b < 18:
-                            pixels[px, py] = (0, 0, 0, 0)
-
                 paste_rgba(img, th, thumb_cx - THUMB_SIZE // 2, thumb_cy - THUMB_SIZE // 2)
                 draw = ImageDraw.Draw(img)
             except Exception:
