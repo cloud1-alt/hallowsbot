@@ -97,7 +97,7 @@ async def get_thumbnails_batch(session: aiohttp.ClientSession, asset_ids: list[i
         ids_str = ",".join(str(a) for a in batch)
         url = (
             f"https://thumbnails.roblox.com/v1/assets"
-            f"?assetIds={ids_str}&size=150x150&format=Png&isCircular=false"
+            f"?assetIds={ids_str}&size=420x420&format=Png&isCircular=false"
         )
         async with session.get(url, headers=HEADERS_ROBLOX) as r:
             if r.status == 200:
@@ -111,7 +111,7 @@ async def get_thumbnails_batch(session: aiohttp.ClientSession, asset_ids: list[i
 async def get_user_avatar_url(session: aiohttp.ClientSession, user_id: int) -> str | None:
     url = (
         f"https://thumbnails.roblox.com/v1/users/avatar-headshot"
-        f"?userIds={user_id}&size=48x48&format=Png"
+        f"?userIds={user_id}&size=420x420&format=Png"
     )
     async with session.get(url, headers=HEADERS_ROBLOX) as r:
         if r.status == 200:
@@ -183,34 +183,36 @@ async def inventory(interaction: discord.Interaction, player: str):
         roli_data = await get_rolimons_player(session, user_id)
         roli_items_db = await get_rolimons_items(session)
 
-        # 3. Fallback: inventário público do Roblox
+        # 3. Montar collectibles
+        # Rolimons usa -1 para indicar "sem dado" (não 0)
         collectibles = []
         if roli_data and roli_data.get("player_assets"):
-            # Rolimons retorna {assetId: [serial, rap, value, ...]}
             for asset_id_str, vals in roli_data["player_assets"].items():
                 item_info = roli_items_db.get(asset_id_str, [])
-                name = item_info[0] if item_info else f"Item #{asset_id_str}"
-                rap = vals[1] if len(vals) > 1 else 0
-                value = vals[2] if len(vals) > 2 else 0
-                serial = vals[0] if vals[0] and vals[0] > 0 else None
+                name   = item_info[0] if item_info else f"Item #{asset_id_str}"
+                rap    = vals[1] if len(vals) > 1 else -1
+                value  = vals[2] if len(vals) > 2 else -1
+                serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
                 collectibles.append({
                     "assetId": int(asset_id_str),
-                    "name": name,
-                    "rap": rap if rap and rap > 0 else None,
-                    "value": value if value and value > 0 else None,
-                    "serial": serial,
+                    "name":    name,
+                    "rap":     rap   if rap   > 0 else None,
+                    "value":   value if value > 0 else None,
+                    "serial":  serial,
                 })
         else:
             raw = await get_collectibles(session, user_id)
             for item in raw:
                 asset_id_str = str(item.get("assetId", ""))
-                item_info = roli_items_db.get(asset_id_str, [])
+                item_info    = roli_items_db.get(asset_id_str, [])
+                rap_raw      = item.get("recentAveragePrice", -1)
+                value_raw    = item_info[2] if len(item_info) > 2 else -1
                 collectibles.append({
                     "assetId": item["assetId"],
-                    "name": item.get("name", item_info[0] if item_info else "Unknown"),
-                    "rap": item.get("recentAveragePrice"),
-                    "value": item_info[2] if len(item_info) > 2 and item_info[2] > 0 else None,
-                    "serial": item.get("serialNumber"),
+                    "name":    item.get("name", item_info[0] if item_info else "Unknown"),
+                    "rap":     rap_raw   if rap_raw   > 0 else None,
+                    "value":   value_raw if value_raw > 0 else None,
+                    "serial":  item.get("serialNumber"),
                 })
 
         if not collectibles:
@@ -220,8 +222,9 @@ async def inventory(interaction: discord.Interaction, player: str):
             return
 
         # 4. Calcular totais
-        total_rap = sum(c["rap"] or 0 for c in collectibles)
-        total_value = sum(c["value"] or 0 for c in collectibles)
+        # Value usa RAP como fallback quando o item não tem value definido
+        total_rap   = sum(c["rap"]   or 0 for c in collectibles)
+        total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
         item_count = len(collectibles)
 
         # Mostrar apenas os primeiros 18 itens na imagem (layout fixo)
