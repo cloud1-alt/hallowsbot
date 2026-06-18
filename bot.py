@@ -184,14 +184,19 @@ async def inventory(interaction: discord.Interaction, player: str):
         roli_items_db = await get_rolimons_items(session)
 
         # 3. Montar collectibles
-        # Rolimons usa -1 para indicar "sem dado" (não 0)
+        # itemdetails: [Name, Acronym, RAP, Value, DefaultValue, Demand, Trend, ...]
+        # player_assets: [serial, rap, value, ...] — índices próprios
+        # Sempre buscar name/value da roli_items_db (mais confiável)
         collectibles = []
         if roli_data and roli_data.get("player_assets"):
             for asset_id_str, vals in roli_data["player_assets"].items():
                 item_info = roli_items_db.get(asset_id_str, [])
-                name   = item_info[0] if item_info else f"Item #{asset_id_str}"
-                rap    = vals[1] if len(vals) > 1 else -1
-                value  = vals[2] if len(vals) > 2 else -1
+                # item_info: [Name, Acronym, RAP, Value, DefaultValue, ...]
+                name  = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
+                # RAP e Value vêm da itemdetails (índices 2 e 3)
+                rap   = item_info[2] if len(item_info) > 2 else -1
+                value = item_info[3] if len(item_info) > 3 else -1
+                # Serial vem do player_assets índice 0
                 serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
                 collectibles.append({
                     "assetId": int(asset_id_str),
@@ -205,11 +210,11 @@ async def inventory(interaction: discord.Interaction, player: str):
             for item in raw:
                 asset_id_str = str(item.get("assetId", ""))
                 item_info    = roli_items_db.get(asset_id_str, [])
-                rap_raw      = item.get("recentAveragePrice", -1)
-                value_raw    = item_info[2] if len(item_info) > 2 else -1
+                rap_raw   = item_info[2] if len(item_info) > 2 else -1
+                value_raw = item_info[3] if len(item_info) > 3 else -1
                 collectibles.append({
                     "assetId": item["assetId"],
-                    "name":    item.get("name", item_info[0] if item_info else "Unknown"),
+                    "name":    item_info[0] if len(item_info) > 0 else item.get("name", "Unknown"),
                     "rap":     rap_raw   if rap_raw   > 0 else None,
                     "value":   value_raw if value_raw > 0 else None,
                     "serial":  item.get("serialNumber"),
@@ -222,7 +227,7 @@ async def inventory(interaction: discord.Interaction, player: str):
             return
 
         # 4. Calcular totais
-        # Value usa RAP como fallback quando o item não tem value definido
+        # Value usa RAP como fallback quando o item não tem value definido no Rolimons
         total_rap   = sum(c["rap"]   or 0 for c in collectibles)
         total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
         item_count = len(collectibles)
