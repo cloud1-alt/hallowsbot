@@ -123,6 +123,20 @@ def draw_hold_clock(img: Image.Image, cx: int, cy: int, radius: int = 10):
     img.paste(layer, mask=layer)
 
 
+def draw_quantity_badge(draw: ImageDraw.Draw, x1: int, y1: int, quantity: int, font):
+    """Badge 'x2' no canto inferior direito do card."""
+    text = f"x{quantity}"
+    tw = int(draw.textlength(text, font=font))
+    pad_x, pad_y = 5, 3
+    bx1 = x1 - 5
+    by1 = y1 - 5
+    bx0 = bx1 - tw - pad_x * 2
+    by0 = by1 - 14 - pad_y * 2
+    draw.rounded_rectangle([bx0, by0, bx1, by1], radius=4,
+                           fill=(20, 14, 6), outline=ORANGE_MAIN, width=1)
+    draw.text((bx0 + pad_x, by0 + pad_y), text, font=font, fill=ORANGE_LIGHT)
+
+
 def make_hallows_bg_pattern(width: int, height: int) -> Image.Image:
     """Fundo com tiles do Hallows repetidos em grade alinhada, semi-transparentes."""
     bg = Image.new("RGBA", (width, height), BG_DARK + (255,))
@@ -341,6 +355,11 @@ def render_inventory_image(
             tw = draw.textlength(serial_str, font=font_serial)
             draw.text((x0 + (CARD_W - tw) // 2, info_y + 30),
                       serial_str, font=font_serial, fill=SERIAL_COLOR)
+
+        # Badge de quantidade (x2, x3...) no canto inferior direito
+        quantity = item.get("quantity", 1)
+        if quantity > 1:
+            draw_quantity_badge(draw, x1, y1, quantity, font_serial)
 
     # ── FOOTER ────────────────────────────────────────────────────────────────
     draw.rectangle([0, img_height - 4, IMG_WIDTH, img_height], fill=ORANGE_MAIN)
