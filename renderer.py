@@ -29,9 +29,9 @@ DIVIDER      = (38, 32, 22)
 IMG_WIDTH  = 1020
 COLS       = 6
 CARD_W     = 148
-CARD_H     = 210
+CARD_H     = 225
 CARD_PAD   = 10
-HEADER_H   = 100
+HEADER_H   = 108
 SIDE_PAD   = 22
 FOOTER_H   = 8
 
@@ -172,14 +172,14 @@ def render_inventory_image(
     draw = ImageDraw.Draw(img)
 
     # ── Fontes (já em 2x via load_font) ───────────────────────────────────────
-    font_username  = load_font(20, bold=True)
-    font_stat_val  = load_font(14, bold=True)
-    font_stat_lbl  = load_font(11)
-    font_item_name = load_font(11, bold=True)
-    font_item_val  = load_font(12, bold=True)
-    font_item_lbl  = load_font(10)
-    font_serial    = load_font(10)
-    font_badge     = load_font(10, bold=True)
+    font_username  = load_font(22, bold=True)
+    font_stat_val  = load_font(16, bold=True)
+    font_stat_lbl  = load_font(13)
+    font_item_name = load_font(13, bold=True)
+    font_item_val  = load_font(14, bold=True)
+    font_item_lbl  = load_font(12)
+    font_serial    = load_font(11)
+    font_badge     = load_font(11, bold=True)
 
     # ── HEADER ────────────────────────────────────────────────────────────────
     # Barra de acento no topo
