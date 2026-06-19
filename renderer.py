@@ -1,35 +1,40 @@
 """
-renderer.py — Gera a imagem do inventário estilo Rolimons
-com tema visual inspirado no Hallows (laranja + preto).
+renderer.py — Inventário estilo moderno/clean com tema Hallows.
+Renderiza em 2x internamente e reduz para 1x no output (supersampling anti-aliasing).
 """
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import io
 import math
 import os
 
-# ─── Paleta Hallows ────────────────────────────────────────────────────────────
-BG_DARK       = (15, 12, 8)          # fundo quase preto
-BG_CARD       = (28, 22, 14)         # card de item
-BG_CARD_HOVER = (40, 30, 15)         # borda accent laranja escuro
-ORANGE_MAIN   = (255, 106, 0)        # laranja principal
-ORANGE_LIGHT  = (255, 165, 60)       # laranja claro
-ORANGE_GLOW   = (255, 90, 0, 60)     # glow sutil
-TEXT_WHITE    = (240, 235, 225)      # texto principal
-TEXT_MUTED    = (160, 145, 120)      # texto secundário
-TEXT_GREEN    = (80, 220, 120)       # valor positivo
-TEXT_GOLD     = (255, 210, 60)       # valor em gold
-DIVIDER       = (50, 38, 22)         # separador
-SERIAL_COLOR  = (255, 186, 60)       # cor do serial (#xxx)
+# ─── Escala de supersampling ───────────────────────────────────────────────────
+S = 2  # fator de escala interno (2x → downscale para 1x no output)
 
-# ─── Layout ────────────────────────────────────────────────────────────────────
-IMG_WIDTH     = 980
-COLS          = 6
-CARD_W        = 140
-CARD_H        = 195
-CARD_PAD      = 10
-HEADER_H      = 90
-SIDE_PAD      = 20
+# ─── Paleta ────────────────────────────────────────────────────────────────────
+BG_DARK      = (13, 11, 9)
+BG_PANEL     = (20, 17, 13)
+BG_CARD      = (26, 22, 16)
+BG_CARD_TOP  = (32, 26, 18)
+ORANGE_MAIN  = (255, 110, 0)
+ORANGE_LIGHT = (255, 175, 70)
+ORANGE_DIM   = (180, 80, 0)
+TEXT_WHITE   = (242, 238, 230)
+TEXT_MUTED   = (140, 130, 112)
+TEXT_GREEN   = (72, 210, 110)
+SERIAL_COLOR = (255, 200, 70)
+DIVIDER      = (38, 32, 22)
+
+# ─── Layout base (1x) — internamente multiplicado por S ────────────────────────
+IMG_WIDTH  = 1020
+COLS       = 6
+CARD_W     = 148
+CARD_H     = 210
+CARD_PAD   = 10
+HEADER_H   = 100
+SIDE_PAD   = 22
+FOOTER_H   = 8
+
 
 # ─── Fontes ────────────────────────────────────────────────────────────────────
 def load_font(size: int, bold: bool = False):
@@ -42,17 +47,19 @@ def load_font(size: int, bold: bool = False):
     for path in candidates:
         if os.path.exists(path):
             try:
-                return ImageFont.truetype(path, size)
+                return ImageFont.truetype(path, size * S)
             except Exception:
                 pass
     return ImageFont.load_default()
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+def s(n): return int(n * S)  # escala um valor para o espaço 2x
+
 
 def fmt_number(n) -> str:
     if n is None:
-        return "-"
+        return "—"
     if n >= 1_000_000:
         return f"{n/1_000_000:.1f}M"
     if n >= 1_000:
@@ -60,13 +67,7 @@ def fmt_number(n) -> str:
     return str(int(n))
 
 
-def draw_rounded_rect(draw: ImageDraw.Draw, xy, radius: int, fill, outline=None, outline_width=1):
-    x0, y0, x1, y1 = xy
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill,
-                           outline=outline, width=outline_width)
-
-
-def paste_centered(base: Image.Image, overlay: Image.Image, cx: int, cy: int):
+def paste_centered(base, overlay, cx, cy):
     x = cx - overlay.width // 2
     y = cy - overlay.height // 2
     if overlay.mode == "RGBA":
@@ -75,297 +76,301 @@ def paste_centered(base: Image.Image, overlay: Image.Image, cx: int, cy: int):
         base.paste(overlay, (x, y))
 
 
-def draw_glow_rect(img: Image.Image, xy, color_rgba, radius=8):
-    """Adiciona um glow sutil em volta de um retângulo."""
-    glow_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow_layer)
+def draw_soft_shadow(img, xy, radius=12, alpha=80):
+    """Sombra suave sob o card via blur."""
     x0, y0, x1, y1 = xy
-    for expand in range(6, 0, -1):
-        alpha = int(color_rgba[3] * (expand / 6))
-        gd.rounded_rectangle(
-            [x0 - expand, y0 - expand, x1 + expand, y1 + expand],
-            radius=radius + expand,
-            fill=(*color_rgba[:3], alpha),
-        )
-    img.paste(glow_layer, mask=glow_layer)
+    shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.rounded_rectangle([x0 + s(2), y0 + s(4), x1 + s(2), y1 + s(4)],
+                         radius=radius, fill=(0, 0, 0, alpha))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=s(6)))
+    img.paste(shadow, mask=shadow)
 
 
-def draw_hold_clock(img: Image.Image, cx: int, cy: int, radius: int = 10):
-    """
-    Desenha um mini ícone de relógio (🕐) no canto superior esquerdo do card,
-    indicando que o item está em hold. Fundo sólido escuro + ponteiros.
-    """
-    # Camada RGBA para o ícone
+def draw_hold_clock(img, cx, cy, r=12):
+    """Ícone de relógio vetorial limpo no canto do card."""
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     ld = ImageDraw.Draw(layer)
 
-    r = radius
-    # Fundo circular escuro semi-opaco
-    ld.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(10, 8, 4, 210))
-    # Borda laranja fina
-    ld.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 106, 0, 255), width=1)
+    # Fundo com borda
+    ld.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(18, 14, 9, 230))
+    ld.ellipse([cx - r, cy - r, cx + r, cy + r],
+               outline=(*ORANGE_MAIN, 255), width=max(1, r // 6))
 
-    # Ponteiro das horas (curto, 12h→3h = 0° offset)
-    hour_len = int(r * 0.50)
-    hx = cx + int(math.sin(math.pi * 0.5) * hour_len)   # 3h position
-    hy = cy - int(math.cos(math.pi * 0.5) * hour_len)
-    ld.line([(cx, cy), (hx, hy)], fill=(255, 165, 60, 255), width=2)
-
-    # Ponteiro dos minutos (longo, apontando pra cima = 12h)
-    min_len = int(r * 0.72)
-    mx = cx + int(math.sin(0) * min_len)
-    my = cy - int(math.cos(0) * min_len)
-    ld.line([(cx, cy), (mx, my)], fill=(240, 235, 225, 255), width=1)
-
+    # Ponteiro dos minutos (12h)
+    ml = int(r * 0.65)
+    ld.line([(cx, cy), (cx, cy - ml)], fill=(*TEXT_WHITE, 230), width=max(1, r // 7))
+    # Ponteiro das horas (3h)
+    hl = int(r * 0.45)
+    ld.line([(cx, cy), (cx + hl, cy)], fill=(*ORANGE_LIGHT, 230), width=max(1, r // 6))
     # Centro
-    ld.ellipse([cx - 1, cy - 1, cx + 1, cy + 1], fill=(255, 165, 60, 255))
+    ld.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(*ORANGE_LIGHT, 255))
 
     img.paste(layer, mask=layer)
 
 
-def draw_quantity_badge(draw: ImageDraw.Draw, x1: int, y1: int, quantity: int, font):
-    """Badge 'x2' no canto inferior direito do card."""
+def draw_quantity_badge(draw, x1, y1, quantity, font):
+    """Badge x2 no canto inferior direito."""
     text = f"x{quantity}"
     tw = int(draw.textlength(text, font=font))
-    pad_x, pad_y = 5, 3
-    bx1 = x1 - 5
-    by1 = y1 - 5
-    bx0 = bx1 - tw - pad_x * 2
-    by0 = by1 - 14 - pad_y * 2
-    draw.rounded_rectangle([bx0, by0, bx1, by1], radius=4,
-                           fill=(20, 14, 6), outline=ORANGE_MAIN, width=1)
-    draw.text((bx0 + pad_x, by0 + pad_y), text, font=font, fill=ORANGE_LIGHT)
+    px, py = s(6), s(3)
+    bx1 = x1 - s(6)
+    by1 = y1 - s(6)
+    bx0 = bx1 - tw - px * 2
+    by0 = by1 - s(16) - py * 2
+    draw.rounded_rectangle([bx0, by0, bx1, by1], radius=s(5),
+                           fill=(*BG_DARK, 220), outline=(*ORANGE_MAIN,), width=s(1))
+    draw.text((bx0 + px, by0 + py), text, font=font, fill=ORANGE_LIGHT)
 
 
-def make_hallows_bg_pattern(width: int, height: int) -> Image.Image:
-    """Fundo com tiles do Hallows repetidos em grade alinhada, semi-transparentes."""
-    bg = Image.new("RGBA", (width, height), BG_DARK + (255,))
+def make_bg(width, height):
+    """Fundo escuro com tile do Hallows muito sutil + vinheta nas bordas."""
+    bg = Image.new("RGBA", (width, height), (*BG_DARK, 255))
 
-    # Tentar carregar a imagem do Hallows
     hallows_path = os.path.join(os.path.dirname(__file__), "hallows.png")
     if os.path.exists(hallows_path):
         tile_src = Image.open(hallows_path).convert("RGBA")
-
-        # Tamanho do tile no grid
-        tile_size = 90
-
-        # Redimensionar mantendo qualidade
+        tile_size = s(80)
         tile = tile_src.resize((tile_size, tile_size), Image.LANCZOS)
+        r2, g2, b2, a2 = tile.split()
+        a2 = a2.point(lambda x: int(x * 0.07))  # muito sutil: 7%
+        tile.putalpha(a2)
+        step = tile_size + s(18)
+        for ry in range(0, height + step, step):
+            for rx in range(0, width + step, step):
+                bg.paste(tile, (rx, ry), tile)
 
-        # Aplicar opacidade baixa para ficar sutil no fundo (20%)
-        r, g, b, a = tile.split()
-        a = a.point(lambda x: int(x * 0.18))
-        tile.putalpha(a)
+    # Overlay escuro para não competir com os cards
+    ov = Image.new("RGBA", (width, height), (*BG_DARK, 160))
+    bg = Image.alpha_composite(bg, ov)
 
-        # Tile em grade alinhada com pequeno gap
-        gap = 14
-        step = tile_size + gap
-
-        for row_y in range(0, height + step, step):
-            for col_x in range(0, width + step, step):
-                bg.paste(tile, (col_x, row_y), tile)
-
-    # Overlay escuro suave sobre os tiles para não competir com os cards
-    overlay = Image.new("RGBA", (width, height), (*BG_DARK, 120))
-    bg = Image.alpha_composite(bg, overlay)
-
-    # Linha decorativa no topo
-    draw = ImageDraw.Draw(bg)
-    for i in range(3):
-        alpha = 120 - i * 35
-        draw.line([(0, i), (width, i)], fill=(*ORANGE_MAIN, alpha), width=1)
-
-    return bg
+    return bg.convert("RGB")
 
 
 # ─── Renderer principal ────────────────────────────────────────────────────────
-
 def render_inventory_image(
     username: str,
     user_id: int,
     total_value: int,
     total_rap: int,
     item_count: int,
-    items: list[dict],
-    thumb_images: dict[int, bytes],  # assetId -> bytes PNG
-    avatar_bytes: bytes | None,
+    items: list,
+    thumb_images: dict,
+    avatar_bytes,
 ) -> bytes:
 
     rows = math.ceil(len(items) / COLS)
     grid_h = rows * (CARD_H + CARD_PAD) + CARD_PAD
-    img_height = HEADER_H + grid_h + 24
+    img_height = HEADER_H + grid_h + FOOTER_H + 16
 
-    # Base
-    bg = make_hallows_bg_pattern(IMG_WIDTH, img_height)
-    img = bg.convert("RGB")
+    # ── Canvas 2x ─────────────────────────────────────────────────────────────
+    W = s(IMG_WIDTH)
+    H = s(img_height)
+
+    bg = make_bg(W, H)
+    img = bg.copy()
     draw = ImageDraw.Draw(img)
 
+    # ── Fontes (já em 2x via load_font) ───────────────────────────────────────
+    font_username  = load_font(20, bold=True)
+    font_stat_val  = load_font(14, bold=True)
+    font_stat_lbl  = load_font(11)
+    font_item_name = load_font(11, bold=True)
+    font_item_val  = load_font(12, bold=True)
+    font_item_lbl  = load_font(10)
+    font_serial    = load_font(10)
+    font_badge     = load_font(10, bold=True)
+
     # ── HEADER ────────────────────────────────────────────────────────────────
+    # Barra de acento no topo
+    draw.rectangle([0, 0, W, s(3)], fill=ORANGE_MAIN)
 
-    # Barra laranja no topo
-    draw.rectangle([0, 0, IMG_WIDTH, 3], fill=ORANGE_MAIN)
+    # Painel do header (fundo levemente diferente)
+    draw.rectangle([0, 0, W, s(HEADER_H)], fill=BG_PANEL)
+    draw.line([(0, s(HEADER_H)), (W, s(HEADER_H))], fill=DIVIDER, width=s(1))
 
-    # Avatar
-    avatar_x, avatar_y = SIDE_PAD, 14
-    avatar_size = 54
+    # Avatar circular
+    av_x, av_y = s(SIDE_PAD), s(18)
+    av_size = s(62)
     if avatar_bytes:
         try:
-            av_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            av_img = av_img.resize((avatar_size, avatar_size), Image.LANCZOS)
-            # Máscara circular
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(mask).ellipse([0, 0, avatar_size, avatar_size], fill=255)
-            # Borda laranja
-            border_img = Image.new("RGBA", (avatar_size + 4, avatar_size + 4), (0, 0, 0, 0))
-            ImageDraw.Draw(border_img).ellipse(
-                [0, 0, avatar_size + 3, avatar_size + 3], fill=ORANGE_MAIN
-            )
-            img.paste(border_img.convert("RGB"), (avatar_x - 2, avatar_y - 2))
-            img.paste(av_img, (avatar_x, avatar_y), mask)
+            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            av = av.resize((av_size, av_size), Image.LANCZOS)
+
+            # Anel externo laranja
+            ring_size = av_size + s(4)
+            ring = Image.new("RGBA", (ring_size, ring_size), (0, 0, 0, 0))
+            ImageDraw.Draw(ring).ellipse([0, 0, ring_size - 1, ring_size - 1],
+                                         fill=ORANGE_MAIN)
+            img.paste(ring.convert("RGB"), (av_x - s(2), av_y - s(2)))
+
+            mask = Image.new("L", (av_size, av_size), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, av_size, av_size], fill=255)
+            img.paste(av, (av_x, av_y), mask)
         except Exception:
             pass
 
-    # Nome do usuário
-    font_name   = load_font(22, bold=True)
-    font_stats  = load_font(13)
-    font_label  = load_font(11)
+    # Nome
+    name_x = av_x + av_size + s(16)
+    name_y = s(20)
+    draw.text((name_x, name_y), username, font=font_username, fill=TEXT_WHITE)
 
-    name_x = avatar_x + avatar_size + 14
-    draw.text((name_x, avatar_y + 2), username, font=font_name, fill=TEXT_WHITE)
-
-    # Linha de stats
-    stats_y = avatar_y + 30
+    # Stats em pills
     stats = [
-        ("Value", fmt_number(total_value)),
-        ("RAP", fmt_number(total_rap)),
-        ("Items", str(item_count)),
+        ("VALUE", fmt_number(total_value)),
+        ("RAP",   fmt_number(total_rap)),
+        ("ITEMS", str(item_count)),
     ]
+    stat_y = name_y + s(32)
     sx = name_x
     for label, val in stats:
-        draw.text((sx, stats_y), label, font=font_label, fill=TEXT_MUTED)
-        tw = draw.textlength(label, font=font_label)
-        draw.text((sx + tw + 4, stats_y), val, font=font_stats, fill=ORANGE_LIGHT)
-        sw = draw.textlength(val, font=font_stats)
-        sx += int(tw + sw + 24)
-
-    # Separador
-    sep_y = HEADER_H - 8
-    draw.line([(SIDE_PAD, sep_y), (IMG_WIDTH - SIDE_PAD, sep_y)], fill=DIVIDER, width=1)
-    # Dot accent no centro do separador
-    mid = IMG_WIDTH // 2
-    draw.ellipse([mid - 3, sep_y - 3, mid + 3, sep_y + 3], fill=ORANGE_MAIN)
+        lw = int(draw.textlength(label, font=font_stat_lbl))
+        vw = int(draw.textlength(val,   font=font_stat_val))
+        pill_w = lw + vw + s(20)
+        pill_h = s(22)
+        # Pill fundo
+        draw.rounded_rectangle([sx, stat_y, sx + pill_w, stat_y + pill_h],
+                               radius=s(5), fill=BG_CARD)
+        # Label
+        draw.text((sx + s(8), stat_y + s(4)), label, font=font_stat_lbl, fill=TEXT_MUTED)
+        # Value
+        draw.text((sx + s(10) + lw, stat_y + s(3)), val, font=font_stat_val, fill=ORANGE_LIGHT)
+        sx += pill_w + s(8)
 
     # ── GRID DE ITENS ─────────────────────────────────────────────────────────
-
-    font_item_name = load_font(11, bold=True)
-    font_item_val  = load_font(11)
-    font_serial    = load_font(10)
-
     total_grid_w = COLS * CARD_W + (COLS - 1) * CARD_PAD
-    grid_x_start = (IMG_WIDTH - total_grid_w) // 2
+    gx_start = (IMG_WIDTH - total_grid_w) // 2
 
     for idx, item in enumerate(items):
         col = idx % COLS
         row = idx // COLS
 
-        x0 = grid_x_start + col * (CARD_W + CARD_PAD)
-        y0 = HEADER_H + CARD_PAD + row * (CARD_H + CARD_PAD)
-        x1 = x0 + CARD_W
-        y1 = y0 + CARD_H
+        # Coordenadas base (1x) → escalar
+        bx0 = gx_start + col * (CARD_W + CARD_PAD)
+        by0 = HEADER_H + CARD_PAD + row * (CARD_H + CARD_PAD)
+        bx1 = bx0 + CARD_W
+        by1 = by0 + CARD_H
 
-        # Glow sutil na borda
-        draw_glow_rect(img, (x0, y0, x1, y1), ORANGE_GLOW, radius=8)
+        x0, y0 = s(bx0), s(by0)
+        x1, y1 = s(bx1), s(by1)
+        r_card = s(10)
 
-        # Card background
-        draw_rounded_rect(draw, (x0, y0, x1, y1), radius=8,
-                         fill=BG_CARD, outline=(*ORANGE_MAIN[:3],), outline_width=1)
+        # Sombra suave
+        draw_soft_shadow(img, (x0, y0, x1, y1), radius=r_card, alpha=70)
 
-        # Ícone de hold (relógio) no canto superior esquerdo do card
+        # Card fundo
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=r_card, fill=BG_CARD)
+
+        # Faixa superior levemente mais clara
+        draw.rounded_rectangle([x0, y0, x1, y0 + s(CARD_H // 2)],
+                               radius=r_card, fill=BG_CARD_TOP)
+        draw.rounded_rectangle([x0, y0 + s(CARD_H // 2) - r_card,
+                                 x1, y0 + s(CARD_H // 2)],
+                               radius=0, fill=BG_CARD_TOP)
+
+        # Borda fina laranja muito sutil
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=r_card,
+                               outline=(*ORANGE_DIM,), width=s(1))
+
+        # Linha separadora entre thumb e info
+        sep_y = y0 + s(int(CARD_H * 0.62))
+        draw.line([(x0 + s(10), sep_y), (x1 - s(10), sep_y)],
+                  fill=DIVIDER, width=s(1))
+
+        # Hold clock
         if item.get("on_hold"):
-            clock_cx = x0 + 14
-            clock_cy = y0 + 14
-            draw_hold_clock(img, clock_cx, clock_cy, radius=10)
+            draw_hold_clock(img, x0 + s(14), y0 + s(14), r=s(11))
 
         # Thumbnail
-        asset_id = item["assetId"]
+        asset_id    = item["assetId"]
         thumb_bytes = thumb_images.get(asset_id)
-        thumb_y = y0 + 8
+        th_size     = s(int(CARD_W * 0.78))
+        thumb_cx    = x0 + (x1 - x0) // 2
+        thumb_cy    = y0 + s(int(CARD_H * 0.31))
+
         if thumb_bytes:
             try:
                 th = Image.open(io.BytesIO(thumb_bytes)).convert("RGBA")
-                th = th.resize((110, 110), Image.LANCZOS)
-                thumb_cx = x0 + CARD_W // 2
-                paste_centered(img, th, thumb_cx, thumb_y + 55)
+                th = th.resize((th_size, th_size), Image.LANCZOS)
+                paste_centered(img, th, thumb_cx, thumb_cy)
             except Exception:
                 pass
         else:
-            # Placeholder
-            ph_x = x0 + 15
-            ph_y = thumb_y + 5
-            draw.rounded_rectangle([ph_x, ph_y, ph_x + 110, ph_y + 110],
-                                   radius=6, fill=(35, 28, 18))
-            draw.text((ph_x + 35, ph_y + 40), "?", font=load_font(30), fill=TEXT_MUTED)
+            ph = th_size
+            px0 = thumb_cx - ph // 2
+            py0 = thumb_cy - ph // 2
+            draw.rounded_rectangle([px0, py0, px0 + ph, py0 + ph],
+                                   radius=s(6), fill=(32, 26, 18))
+            draw.text((px0 + ph // 2 - s(8), py0 + ph // 2 - s(10)),
+                      "?", font=load_font(20), fill=TEXT_MUTED)
 
-        # Nome do item (2 linhas max)
-        name = item.get("name", "Unknown")
-        name_y = y0 + 126
-        # Quebra nome longo
-        words = name.split()
-        lines = []
-        current = ""
+        # Nome do item
+        name   = item.get("name", "Unknown")
+        name_y2 = sep_y + s(8)
+        words  = name.split()
+        lines  = []
+        cur    = ""
         for w in words:
-            test = (current + " " + w).strip()
-            if draw.textlength(test, font=font_item_name) <= CARD_W - 8:
-                current = test
+            test = (cur + " " + w).strip()
+            if draw.textlength(test, font=font_item_name) <= s(CARD_W - 14):
+                cur = test
             else:
-                if current:
-                    lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
         lines = lines[:2]
 
+        line_h = s(15)
         for i, line in enumerate(lines):
-            tw = draw.textlength(line, font=font_item_name)
-            draw.text((x0 + (CARD_W - tw) // 2, name_y + i * 14),
+            tw = int(draw.textlength(line, font=font_item_name))
+            draw.text((x0 + ((x1 - x0) - tw) // 2, name_y2 + i * line_h),
                       line, font=font_item_name, fill=TEXT_WHITE)
 
-        # RAP
-        rap = item.get("rap")
+        # RAP + Value
+        rap   = item.get("rap")
         value = item.get("value")
         serial = item.get("serial")
 
-        info_y = y0 + CARD_H - 44
+        info_y = y1 - s(46)
 
-        # Linha RAP
-        rap_str = f"RAP  {fmt_number(rap)}" if rap else "RAP  -"
-        tw = draw.textlength(rap_str, font=font_item_val)
-        draw.text((x0 + (CARD_W - tw) // 2, info_y), rap_str, font=font_item_val, fill=TEXT_MUTED)
+        # RAP: label + valor na mesma linha
+        rap_lbl = "RAP"
+        rap_val = fmt_number(rap) if rap else "—"
+        lw = int(draw.textlength(rap_lbl, font=font_item_lbl))
+        vw = int(draw.textlength(rap_val, font=font_item_val))
+        total_w = lw + s(6) + vw
+        rx = x0 + ((x1 - x0) - total_w) // 2
+        draw.text((rx, info_y), rap_lbl, font=font_item_lbl, fill=TEXT_MUTED)
+        draw.text((rx + lw + s(6), info_y - s(1)), rap_val, font=font_item_val, fill=TEXT_MUTED)
 
-        # Linha Value
-        val_str = fmt_number(value) if value else "-"
-        tw = draw.textlength(val_str, font=font_item_val)
+        # Value
+        val_str   = fmt_number(value) if value else "—"
         val_color = TEXT_GREEN if value and value > (rap or 0) else ORANGE_LIGHT
-        draw.text((x0 + (CARD_W - tw) // 2, info_y + 15),
+        vw2 = int(draw.textlength(val_str, font=font_item_val))
+        draw.text((x0 + ((x1 - x0) - vw2) // 2, info_y + s(17)),
                   val_str, font=font_item_val, fill=val_color)
 
         # Serial
         if serial:
-            serial_str = f"#{serial}"
-            tw = draw.textlength(serial_str, font=font_serial)
-            draw.text((x0 + (CARD_W - tw) // 2, info_y + 30),
-                      serial_str, font=font_serial, fill=SERIAL_COLOR)
+            sstr = f"#{serial}"
+            sw = int(draw.textlength(sstr, font=font_serial))
+            draw.text((x0 + ((x1 - x0) - sw) // 2, info_y + s(32)),
+                      sstr, font=font_serial, fill=SERIAL_COLOR)
 
-        # Badge de quantidade (x2, x3...) no canto inferior direito
+        # Badge quantidade
         quantity = item.get("quantity", 1)
         if quantity > 1:
-            draw_quantity_badge(draw, x1, y1, quantity, font_serial)
+            draw_quantity_badge(draw, x1, y1, quantity, font_badge)
 
     # ── FOOTER ────────────────────────────────────────────────────────────────
-    draw.rectangle([0, img_height - 4, IMG_WIDTH, img_height], fill=ORANGE_MAIN)
+    draw.rectangle([0, H - s(FOOTER_H), W, H], fill=ORANGE_MAIN)
 
-    # Salvar
+    # ── DOWNSCALE 2x → 1x (antialiasing) ─────────────────────────────────────
+    out_img = img.resize((IMG_WIDTH, img_height), Image.LANCZOS)
+
     out = io.BytesIO()
-    img.save(out, format="PNG", optimize=True)
+    out_img.save(out, format="PNG", optimize=True)
     out.seek(0)
     return out.read()
