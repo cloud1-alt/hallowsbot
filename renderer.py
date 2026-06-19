@@ -26,13 +26,13 @@ SERIAL_COLOR = (255, 200, 70)
 DIVIDER      = (38, 32, 22)
 
 # ─── Layout base (1x) — internamente multiplicado por S ────────────────────────
-IMG_WIDTH  = 1020
+IMG_WIDTH  = 1100
 COLS       = 6
-CARD_W     = 148
-CARD_H     = 225
-CARD_PAD   = 10
-HEADER_H   = 108
-SIDE_PAD   = 22
+CARD_W     = 162
+CARD_H     = 245
+CARD_PAD   = 12
+HEADER_H   = 115
+SIDE_PAD   = 24
 FOOTER_H   = 8
 
 
@@ -172,14 +172,14 @@ def render_inventory_image(
     draw = ImageDraw.Draw(img)
 
     # ── Fontes (já em 2x via load_font) ───────────────────────────────────────
-    font_username  = load_font(22, bold=True)
-    font_stat_val  = load_font(16, bold=True)
-    font_stat_lbl  = load_font(13)
-    font_item_name = load_font(13, bold=True)
-    font_item_val  = load_font(14, bold=True)
-    font_item_lbl  = load_font(12)
-    font_serial    = load_font(11)
-    font_badge     = load_font(11, bold=True)
+    font_username  = load_font(26, bold=True)
+    font_stat_val  = load_font(18, bold=True)
+    font_stat_lbl  = load_font(14)
+    font_item_name = load_font(15, bold=True)
+    font_item_val  = load_font(16, bold=True)
+    font_item_lbl  = load_font(13)
+    font_serial    = load_font(12)
+    font_badge     = load_font(13, bold=True)
 
     # ── HEADER ────────────────────────────────────────────────────────────────
     # Barra de acento no topo
@@ -340,23 +340,23 @@ def render_inventory_image(
         rap_val = fmt_number(rap) if rap else "—"
         lw = int(draw.textlength(rap_lbl, font=font_item_lbl))
         vw = int(draw.textlength(rap_val, font=font_item_val))
-        total_w = lw + s(6) + vw
+        total_w = lw + s(8) + vw
         rx = x0 + ((x1 - x0) - total_w) // 2
         draw.text((rx, info_y), rap_lbl, font=font_item_lbl, fill=TEXT_MUTED)
-        draw.text((rx + lw + s(6), info_y - s(1)), rap_val, font=font_item_val, fill=TEXT_MUTED)
+        draw.text((rx + lw + s(8), info_y - s(2)), rap_val, font=font_item_val, fill=TEXT_MUTED)
 
         # Value
         val_str   = fmt_number(value) if value else "—"
         val_color = TEXT_GREEN if value and value > (rap or 0) else ORANGE_LIGHT
         vw2 = int(draw.textlength(val_str, font=font_item_val))
-        draw.text((x0 + ((x1 - x0) - vw2) // 2, info_y + s(17)),
+        draw.text((x0 + ((x1 - x0) - vw2) // 2, info_y + s(20)),
                   val_str, font=font_item_val, fill=val_color)
 
         # Serial
         if serial:
             sstr = f"#{serial}"
             sw = int(draw.textlength(sstr, font=font_serial))
-            draw.text((x0 + ((x1 - x0) - sw) // 2, info_y + s(32)),
+            draw.text((x0 + ((x1 - x0) - sw) // 2, info_y + s(38)),
                       sstr, font=font_serial, fill=SERIAL_COLOR)
 
         # Badge quantidade
