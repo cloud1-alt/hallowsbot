@@ -163,6 +163,31 @@ async def download_image(session, url):
     return None
 
 
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def group_collectibles(collectibles: list) -> list:
+    """
+    Agrupa itens duplicados pelo assetId.
+    - quantity: número de cópias
+    - on_hold: True se qualquer cópia estiver em hold
+    - serial: None quando há múltiplas cópias (não faz sentido exibir)
+    - value/rap: mantém o do primeiro (são iguais para o mesmo assetId)
+    """
+    grouped = {}
+    for item in collectibles:
+        aid = item["assetId"]
+        if aid not in grouped:
+            grouped[aid] = {**item, "quantity": 1}
+        else:
+            grouped[aid]["quantity"] += 1
+            # Qualquer cópia em hold marca o grupo inteiro
+            if item.get("on_hold"):
+                grouped[aid]["on_hold"] = True
+            # Serial não faz sentido com múltiplas cópias
+            grouped[aid]["serial"] = None
+    return list(grouped.values())
+
+
 # ─── Slash command ─────────────────────────────────────────────────────────────
 
 @tree.command(
@@ -195,8 +220,7 @@ async def inventory(interaction: discord.Interaction, player: str):
             get_collectibles(session, user_id),
         )
 
-        # 3. Montar mapa assetId -> isOnHold direto da API do Roblox
-        # O campo "isOnHold" é nativo e confiável — true = item em hold
+        # 3. Mapa assetId -> isOnHold (nativo da API do Roblox)
         hold_map = {
             item["assetId"]: item.get("isOnHold", False)
             for item in raw_collectibles
@@ -213,9 +237,9 @@ async def inventory(interaction: discord.Interaction, player: str):
                 item_info = roli_items_db.get(asset_id_str, [])
                 asset_id  = int(asset_id_str)
 
-                name  = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
-                rap   = vals[1]      if len(vals) > 1       else -1
-                value = item_info[ITEMDB_VALUE_IDX] if len(item_info) > ITEMDB_VALUE_IDX else -1
+                name   = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
+                rap    = vals[1]      if len(vals) > 1       else -1
+                value  = item_info[ITEMDB_VALUE_IDX] if len(item_info) > ITEMDB_VALUE_IDX else -1
                 serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
 
                 collectibles.append({
@@ -248,25 +272,28 @@ async def inventory(interaction: discord.Interaction, player: str):
             )
             return
 
-        # 5. Ordenar do maior pro menor value (fallback: rap)
+        # 5. Agrupar duplicatas
+        collectibles = group_collectibles(collectibles)
+
+        # 6. Ordenar do maior pro menor value (fallback: rap)
         collectibles.sort(
             key=lambda c: (c["value"] or c["rap"] or 0),
             reverse=True,
         )
 
-        # 6. Calcular totais
-        total_rap   = sum(c["rap"]   or 0 for c in collectibles)
-        total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
-        item_count  = len(collectibles)
+        # 7. Calcular totais (multiplicando pela quantidade)
+        total_rap   = sum((c["rap"]   or 0) * c["quantity"] for c in collectibles)
+        total_value = sum((c["value"] or c["rap"] or 0) * c["quantity"] for c in collectibles)
+        item_count  = sum(c["quantity"] for c in collectibles)  # total real de peças
 
-        # Mostrar apenas os primeiros 18 itens na imagem
+        # Mostrar apenas os primeiros 18 grupos na imagem
         display_items = collectibles[:18]
 
-        # 7. Thumbnails em batch
+        # 8. Thumbnails em batch
         asset_ids = [c["assetId"] for c in display_items]
         thumbs    = await get_thumbnails_batch(session, asset_ids)
 
-        # 8. Download das imagens em paralelo
+        # 9. Download das imagens em paralelo
         thumb_images = {}
         tasks   = {aid: download_image(session, url) for aid, url in thumbs.items()}
         results = await asyncio.gather(*tasks.values())
@@ -274,13 +301,13 @@ async def inventory(interaction: discord.Interaction, player: str):
             if img_bytes:
                 thumb_images[aid] = img_bytes
 
-        # 9. Avatar
+        # 10. Avatar
         avatar_url   = await get_user_avatar_url(session, user_id)
         avatar_bytes = None
         if avatar_url:
             avatar_bytes = await download_image(session, avatar_url)
 
-        # 10. Renderizar imagem
+        # 11. Renderizar imagem
         loop = asyncio.get_running_loop()
         img_bytes = await loop.run_in_executor(
             None,
@@ -295,7 +322,7 @@ async def inventory(interaction: discord.Interaction, player: str):
             avatar_bytes,
         )
 
-        # 11. Mandar só a imagem pura (sem embed, sem footer)
+        # 12. Mandar só a imagem pura
         file = discord.File(io.BytesIO(img_bytes), filename="inventory.png")
         await interaction.followup.send(file=file)
 
