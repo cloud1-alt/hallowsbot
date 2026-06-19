@@ -4,7 +4,6 @@ import aiohttp
 import asyncio
 import io
 import os
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 from renderer import render_inventory_image
 
@@ -54,6 +53,10 @@ async def resolve_user(session, identifier):
 
 
 async def get_collectibles(session, user_id):
+    """
+    Retorna todos os limiteds do inventário via API pública do Roblox.
+    Cada item inclui: assetId, serialNumber, recentAveragePrice, isOnHold, name, etc.
+    """
     items = []
     cursor = ""
     while True:
@@ -128,10 +131,8 @@ async def get_rolimons_player(session, user_id):
 async def get_rolimons_items(session):
     """
     itemdetails: { assetId: [Name(0), Acronym(1), RAP(2), Value(3), DefaultValue(4), ...] }
-    Tenta o endpoint público primeiro (sem cookie), fallback pro autenticado.
     Value == -1 significa sem value definido no Rolimons.
     """
-    # Endpoint público — não precisa de cookie
     urls = [
         ("https://api.rolimons.com/items/v2/itemdetails", HEADERS_ROBLOX),
         ("https://www.rolimons.com/itemapi/itemdetails",  HEADERS_ROLIMONS),
@@ -187,57 +188,58 @@ async def inventory(interaction: discord.Interaction, player: str):
         user_id  = user["id"]
         username = user["name"]
 
-        # 2. Buscar dados Rolimons
-        roli_data     = await get_rolimons_player(session, user_id)
-        roli_items_db = await get_rolimons_items(session)
+        # 2. Buscar tudo em paralelo
+        roli_data, roli_items_db, raw_collectibles = await asyncio.gather(
+            get_rolimons_player(session, user_id),
+            get_rolimons_items(session),
+            get_collectibles(session, user_id),
+        )
 
-        # 3. Montar collectibles
+        # 3. Montar mapa assetId -> isOnHold direto da API do Roblox
+        # O campo "isOnHold" é nativo e confiável — true = item em hold
+        hold_map = {
+            item["assetId"]: item.get("isOnHold", False)
+            for item in raw_collectibles
+        }
+
+        # 4. Montar collectibles
         # itemdetails: [Name(0), Acronym(1), RAP(2), Value(3), DefaultValue(4), ...]
-        # player_assets do Rolimons: { assetId: [serial, rap, value, ...] }
-        #   — mas RAP/Value aqui podem estar desatualizados; usamos itemdetails como fonte principal
-        now_ts = int(datetime.now(timezone.utc).timestamp())
+        ITEMDB_VALUE_IDX = 3
 
         collectibles = []
         if roli_data and roli_data.get("player_assets"):
+            # player_assets: { assetId: [serial(0), rap(1)] }
             for asset_id_str, vals in roli_data["player_assets"].items():
                 item_info = roli_items_db.get(asset_id_str, [])
+                asset_id  = int(asset_id_str)
 
                 name  = item_info[0] if len(item_info) > 0 else f"Item #{asset_id_str}"
-                rap   = item_info[2] if len(item_info) > 2 else -1
-                value = item_info[3] if len(item_info) > 3 else -1
-
+                rap   = vals[1]      if len(vals) > 1       else -1
+                value = item_info[ITEMDB_VALUE_IDX] if len(item_info) > ITEMDB_VALUE_IDX else -1
                 serial = vals[0] if len(vals) > 0 and vals[0] and vals[0] > 0 else None
 
-                # hold: timestamp em que o player obteve o item (índice 4 no player_assets)
-                obtained_ts = vals[4] if len(vals) > 4 and vals[4] and vals[4] > 0 else None
-                # Como não temos info se foi trade ou compra, usamos 7 dias como hold padrão
-                on_hold = False
-                if obtained_ts:
-                    days_held = (now_ts - obtained_ts) / 86400
-                    on_hold = days_held < 7
-
                 collectibles.append({
-                    "assetId":  int(asset_id_str),
-                    "name":     name,
-                    "rap":      rap   if rap   > 0 else None,
-                    "value":    value if value > 0 else None,
-                    "serial":   serial,
-                    "on_hold":  on_hold,
+                    "assetId": asset_id,
+                    "name":    name,
+                    "rap":     rap   if rap   > 0 else None,
+                    "value":   value if value > 0 else None,
+                    "serial":  serial,
+                    "on_hold": hold_map.get(asset_id, False),
                 })
         else:
-            raw = await get_collectibles(session, user_id)
-            for item in raw:
+            # Fallback: monta direto dos collectibles do Roblox
+            for item in raw_collectibles:
                 asset_id_str = str(item.get("assetId", ""))
                 item_info    = roli_items_db.get(asset_id_str, [])
                 rap_raw   = item_info[2] if len(item_info) > 2 else -1
-                value_raw = item_info[3] if len(item_info) > 3 else -1
+                value_raw = item_info[ITEMDB_VALUE_IDX] if len(item_info) > ITEMDB_VALUE_IDX else -1
                 collectibles.append({
                     "assetId": item["assetId"],
                     "name":    item_info[0] if len(item_info) > 0 else item.get("name", "Unknown"),
                     "rap":     rap_raw   if rap_raw   > 0 else None,
                     "value":   value_raw if value_raw > 0 else None,
                     "serial":  item.get("serialNumber"),
-                    "on_hold": False,
+                    "on_hold": item.get("isOnHold", False),
                 })
 
         if not collectibles:
@@ -246,13 +248,13 @@ async def inventory(interaction: discord.Interaction, player: str):
             )
             return
 
-        # 4. Ordenar do maior pro menor value (fallback: rap)
+        # 5. Ordenar do maior pro menor value (fallback: rap)
         collectibles.sort(
             key=lambda c: (c["value"] or c["rap"] or 0),
             reverse=True,
         )
 
-        # 5. Calcular totais (value usa rap como fallback se não tiver value)
+        # 6. Calcular totais
         total_rap   = sum(c["rap"]   or 0 for c in collectibles)
         total_value = sum(c["value"] or c["rap"] or 0 for c in collectibles)
         item_count  = len(collectibles)
@@ -260,11 +262,11 @@ async def inventory(interaction: discord.Interaction, player: str):
         # Mostrar apenas os primeiros 18 itens na imagem
         display_items = collectibles[:18]
 
-        # 6. Thumbnails em batch
+        # 7. Thumbnails em batch
         asset_ids = [c["assetId"] for c in display_items]
         thumbs    = await get_thumbnails_batch(session, asset_ids)
 
-        # 7. Download das imagens em paralelo
+        # 8. Download das imagens em paralelo
         thumb_images = {}
         tasks   = {aid: download_image(session, url) for aid, url in thumbs.items()}
         results = await asyncio.gather(*tasks.values())
@@ -272,14 +274,15 @@ async def inventory(interaction: discord.Interaction, player: str):
             if img_bytes:
                 thumb_images[aid] = img_bytes
 
-        # 8. Avatar
+        # 9. Avatar
         avatar_url   = await get_user_avatar_url(session, user_id)
         avatar_bytes = None
         if avatar_url:
             avatar_bytes = await download_image(session, avatar_url)
 
-        # 9. Renderizar imagem
-        img_bytes = await asyncio.get_event_loop().run_in_executor(
+        # 10. Renderizar imagem
+        loop = asyncio.get_running_loop()
+        img_bytes = await loop.run_in_executor(
             None,
             render_inventory_image,
             username,
@@ -292,7 +295,7 @@ async def inventory(interaction: discord.Interaction, player: str):
             avatar_bytes,
         )
 
-        # 10. Mandar só a imagem pura (sem embed, sem footer)
+        # 11. Mandar só a imagem pura (sem embed, sem footer)
         file = discord.File(io.BytesIO(img_bytes), filename="inventory.png")
         await interaction.followup.send(file=file)
 
