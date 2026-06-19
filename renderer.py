@@ -26,10 +26,10 @@ SERIAL_COLOR = (255, 200, 70)
 DIVIDER      = (38, 32, 22)
 
 # ─── Layout base (1x) — internamente multiplicado por S ────────────────────────
-IMG_WIDTH  = 1100
-COLS       = 6
-CARD_W     = 162
-CARD_H     = 245
+IMG_WIDTH  = 1080
+COLS       = 5
+CARD_W     = 196
+CARD_H     = 260
 CARD_PAD   = 12
 HEADER_H   = 115
 SIDE_PAD   = 24
@@ -172,14 +172,14 @@ def render_inventory_image(
     draw = ImageDraw.Draw(img)
 
     # ── Fontes (já em 2x via load_font) ───────────────────────────────────────
-    font_username  = load_font(26, bold=True)
-    font_stat_val  = load_font(18, bold=True)
-    font_stat_lbl  = load_font(14)
-    font_item_name = load_font(15, bold=True)
-    font_item_val  = load_font(16, bold=True)
-    font_item_lbl  = load_font(13)
-    font_serial    = load_font(12)
-    font_badge     = load_font(13, bold=True)
+    font_username  = load_font(28, bold=True)
+    font_stat_val  = load_font(20, bold=True)
+    font_stat_lbl  = load_font(15)
+    font_item_name = load_font(17, bold=True)
+    font_item_val  = load_font(18, bold=True)
+    font_item_lbl  = load_font(14)
+    font_serial    = load_font(13)
+    font_badge     = load_font(14, bold=True)
 
     # ── HEADER ────────────────────────────────────────────────────────────────
     # Barra de acento no topo
